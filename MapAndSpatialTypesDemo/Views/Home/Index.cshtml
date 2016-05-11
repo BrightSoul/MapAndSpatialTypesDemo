@@ -1,0 +1,264 @@
+﻿@{
+    ViewBag.Title = "Map / Spatial types demo";
+}
+
+    <h1>Demo Spatial Types di SQL Server</h1>
+    <p class="lead">Questo esempio mostra come estrarre delle entità (i Comuni italiani, in questo caso) in base alla loro posizione geografica, sfruttando gli spatial types di SQL Server. Trascina la mappa o disegna forme per visualizzare dei risultati.</p>
+
+<div class="row">
+    <div class="col-md-12" style="margin-bottom:15px;">
+        <div id="map" style="width: 100%; height: 400px; border: 1px solid #ccc;"></div>
+        <!-- http://dev.openlayers.org/examples/draw-feature.html -->
+    </div>
+    </div>
+<div class="row">
+    <div class="col-md-2">
+        <div class="btn-group">
+            <button type="button" class="btn btn-default dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
+                Aggiungi forma <span class="caret"></span>
+            </button>
+            <ul class="dropdown-menu">
+                <li><a href="#" onclick="disegnaPunti()">Punto</a></li>
+                <li><a href="#" onclick="disegnaLinee()">Linea</a></li>
+                <li><a href="#" onclick="disegnaPoligoni()">Poligono</a></li>
+                <li role="separator" class="divider"></li>
+                <li><a href="#" onclick="cercaInBaseAllEstensioneDellaMappa()">Pulisci</a></li>
+            </ul>
+        </div>
+    </div>
+    <div class="col-md-10" id="status">
+
+    </div>
+    </div>
+    <div class="row">
+        <div class="col-md-12">
+            <footer>
+                Basato sull'esempio <a href="http://dev.openlayers.org/examples/draw-feature.html" target="_blank">Open Layers Draw Feature</a>
+            </footer>
+        </div>
+    </div>
+</div>
+
+@section Scripts{
+<script type="text/javascript">
+//Per questa mappa che mostra i Comuni, imposto i confini del territorio italiano (approssimativamente)
+var bounds = new OpenLayers.Bounds();
+bounds.extend(new OpenLayers.LonLat(6.598409, 46.956567));
+bounds.extend(new OpenLayers.LonLat(18.661397, 36.127588));
+var mapOptions = {
+    maxExtent: bounds,
+    projection: new OpenLayers.Projection("EPSG:4326"),
+    displayProjection: new OpenLayers.Projection("EPSG:4326")
+};
+
+//Creo la mappa
+var map = new OpenLayers.Map('map', mapOptions);
+
+//Aggiungo i layer: la mappa base e i due livelli che mi serviranno per disegnare i marker ed i poligoni
+var wmsLayer = new OpenLayers.Layer.WMS( "OpenLayers WMS", "http://vmap0.tiles.osgeo.org/wms/vmap0?", {layers: 'basic'});
+var markerLayer = new OpenLayers.Layer.Markers("Marker Layer");
+
+var layerPunti = new OpenLayers.Layer.Vector("Layer punti");
+var layerPoligoni = new OpenLayers.Layer.Vector("Layer poligoni");
+var layerLinee = new OpenLayers.Layer.Vector("Layer linee");
+
+map.addLayers([wmsLayer, layerPunti, layerLinee, layerPoligoni, markerLayer]);
+
+//Ogni volta che l'utente sposta la mappa, cerco i Comuni nell'area geografica inquadrata
+map.events.register("moveend", map, cercaInBaseAllEstensioneDellaMappa);
+
+
+//Aggiungo la funzionalità che mi permette di disegnare i punti, le linee e i poligoni
+var controlloPunti = new OpenLayers.Control.DrawFeature(layerPunti, OpenLayers.Handler.Point);
+var controlloLinee = new OpenLayers.Control.DrawFeature(layerLinee, OpenLayers.Handler.Path);
+var controlloPoligoni = new OpenLayers.Control.DrawFeature(layerPoligoni, OpenLayers.Handler.Polygon);
+
+map.addControl(controlloPunti);
+map.addControl(controlloLinee);
+map.addControl(controlloPoligoni);
+
+    //Ogni qualvolta l'utente disegna una forma, rieffettua la ricerca in quei nuovi confini geografici
+layerPunti.events.on({
+    featuresadded: cercaInBaseAiPunti
+});
+layerLinee.events.on({
+    featuresadded: cercaInBaseAlleLinee
+});
+layerPoligoni.events.on({
+    featuresadded: cercaInBaseAiPoligoni
+});
+
+//Centro la mappa
+map.setCenter(new OpenLayers.LonLat(12.509053, 42.007188), 8);
+
+//Questa funzione invia una richiesta ajax al server fornendo i confini geografici (POLYGON o MULTIPOLYGON) in formato Well-Know Text
+//https://it.wikipedia.org/wiki/Well-Known_Text
+function cercaComuni(url, forma, distanza) {
+    logga("Caricamento in corso...");
+
+    $.post(url, { forma: forma })
+    .success(function (risultati) {
+    //Tre differenti icone per comuni, capoluoghi di provincia e capoluoghi di regione
+    var icone =
+        {
+            "1": new OpenLayers.Icon('/Content/Markers/Comune.png', new OpenLayers.Size(16, 16), new OpenLayers.Pixel(-8, -16)),
+            "2": new OpenLayers.Icon('/Content/Markers/CapoluogoDiProvincia.png', new OpenLayers.Size(24, 24), new OpenLayers.Pixel(-12, -24)),
+            "3": new OpenLayers.Icon('/Content/Markers/CapoluogoDiRegione.png', new OpenLayers.Size(32, 32), new OpenLayers.Pixel(-16, -32)),
+        };
+    var ruoli = { "1": "Comune", "2": "Capoluogo di provincia", "3": "Capoluogo di regione" };
+    markerLayer.clearMarkers();
+
+    if (risultati.Comuni.length == 100) {
+        logga("Il server ha limitato i risultati a 100 in questi confini geografici: " + forma + (distanza ? " con distanza di " + distanza + " metri" : "") + ". Prova a zoomare o a disegnare una forma più piccola.");
+    } else {
+        logga("Il server ha restituito " + risultati.Comuni.length + " risultati in questi confini geografici: " + forma + (distanza ? " con distanza di " + distanza + " metri" : ""));
+    }
+    //Per ogni Comune restituito, aggiungo un marker
+    for (var i = 0; i < risultati.Comuni.length; i++) {
+        var comune = risultati.Comuni[i];
+        var posizione = new OpenLayers.LonLat(comune.Lon, comune.Lat);
+        var marker = new OpenLayers.Marker(posizione, icone[comune.Ruolo].clone());
+        marker.title = comune.Nome + "&nbsp;(" + comune.Provincia + ")<br />" + ruoli[comune.Ruolo];
+        markerLayer.addMarker(marker);
+        //Faccio apparire un popup al mouse over
+        marker.events.register('mouseover', marker, function () {
+            var popup = new OpenLayers.Popup.FramedCloud("Popup", this.lonlat, null, '<div>' + this.title + '</div>', null, false);
+            map.addPopup(popup);
+            this.popup = popup;
+            this.events.register('mouseout', this,
+              function () {
+                  this.popup.destroy();
+              });
+        });
+    }
+})
+.error(function () { alert("Si è verificato un errore"); });
+}
+
+
+    function cercaInBaseAllEstensioneDellaMappa() {
+        selezionaControllo(null);
+        var extent = map.getExtent();
+        var templateRettangolo = "POLYGON((left bottom, right bottom, right top, left top, left bottom))";
+        var rettangolo = templateRettangolo
+            .replace(/top/g, extent.top)
+            .replace(/left/g, extent.left)
+            .replace(/bottom/g, extent.bottom)
+            .replace(/right/g, extent.right);
+
+        cercaComuni("@Url.Action("Intersezione")", rettangolo);
+}
+
+    function cercaInBaseAiPunti() {
+        //il trascinamento del mouse può causare qualche effetto di selezione indesiderato
+        deseleziona();
+        controlloPunti.deactivate();
+        var punti = [];
+        for (var f = 0; f < layerPunti.features.length; f++) {
+            var vertici = layerPunti.features[f].geometry.getVertices().map(
+                function (vertice) {
+                    return vertice.x + " " + vertice.y;
+                }
+                );
+            punti.push(vertici.join(","));
+        }
+        var forma = punti.length == 1 ?
+            "POINT(" + punti[0] + ")" :
+            "MULTIPOINT(" + punti.join(",") + ")";
+
+        cercaComuni("@Url.Action("Distanza", new { distanzaInMetri = 20000 })", forma, 20000);
+    }
+
+    function cercaInBaseAlleLinee() {
+        controlloLinee.deactivate();
+        //il trascinamento del mouse può causare qualche effetto di selezione indesiderato
+        deseleziona();
+        var linee = [];
+        for (var f = 0; f < layerLinee.features.length; f++) {
+            var vertici =layerLinee.features[f].geometry.getVertices().map(
+                function (vertice) {
+                    return vertice.x + " " + vertice.y;
+                }
+                );
+            linee.push("(" + vertici.join(",") + ")");
+        }
+        var forma = linee.length == 1 ?
+            "LINESTRING" + linee[0] :
+            "MULTILINESTRING(" + linee.join(",") + ")";
+
+        cercaComuni("@Url.Action("Distanza", new { distanzaInMetri = 10000 })", forma, 10000);
+    }
+
+function cercaInBaseAiPoligoni() {
+    //il trascinamento del mouse può causare qualche effetto di selezione indesiderato
+    deseleziona();
+    controlloPoligoni.deactivate();
+    var poligoni = [];
+    for (var f = 0; f < layerPoligoni.features.length; f++) {
+        var vertici = layerPoligoni.features[f].geometry.getVertices().map(
+            function (vertice) {
+                return vertice.x + " " + vertice.y;
+            }
+            );
+        //La notazione WKT richiede che l'ultimo vertice sia identico al primo
+        vertici.push(vertici[0]);
+        poligoni.push("((" + vertici.join(",") + "))");
+    }
+    console.log(poligoni);
+
+    var forma = poligoni.length == 1 ?
+        "POLYGON" + poligoni[0] :
+        "MULTIPOLYGON(" + poligoni.join(",") + ")";
+
+    console.log("ecco", forma);
+
+    cercaComuni("@Url.Action("Intersezione")", forma);
+}
+
+function selezionaControllo(controllo) {
+
+    var controlli = [controlloPunti, controlloLinee, controlloPoligoni];
+    var layers = [layerPunti, layerLinee, layerPoligoni];
+
+    for (var i = 0; i < controlli.length; i++) {
+        if (controllo != controlli[i]) {
+            layers[i].removeAllFeatures();
+            if (controlli[i].active)
+                controlli[i].deactivate();
+        }
+    }
+
+    var indice = controlli.indexOf(controllo);
+    if (indice > -1 && !controlli[indice].active)
+        controlli[indice].activate();
+
+}
+
+function disegnaPunti() {
+    selezionaControllo(controlloPunti);
+    logga("Clicca sulla mappa per disegnare dei punti. Verranno restituiti i Comuni nel raggio di 20 Km.");
+}
+function disegnaLinee() {
+    selezionaControllo(controlloLinee);
+    logga("Clicca sulla mappa per disegnare una linea. Doppioclick per completarla. Verranno restituiti i Comuni distanti un massimo di 10Km dalle linee tracciate.");
+}
+function disegnaPoligoni() {
+    selezionaControllo(controlloPoligoni);
+    logga("Clicca sulla mappa per disegnare un poligono. Doppioclick per completarlo. Disegnando in senso antiorario, usciranno i comuni che si trovano all'interno del poligono, altrimenti all'esterno.");
+}
+
+function logga(testo) {
+    console.log(testo);
+    $("#status").text(testo);
+}
+
+function deseleziona() {
+    if (window.getSelection) {
+        window.getSelection().removeAllRanges();
+    } else if (document.selection) {
+        document.selection.empty();
+    }
+}
+cercaInBaseAllEstensioneDellaMappa();
+</script>
+}
